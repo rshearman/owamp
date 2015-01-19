@@ -1896,7 +1896,7 @@ main(
             }
             else if(!ping_ctx.opt.quiet || ping_ctx.opt.raw){
                 if( do_stats(ctx,tofp,local,remote)){
-                    I2ErrLog(eh, "do_stats(\"to\" session): %M");
+                    I2ErrLog(eh, "do_stats(\"to\" session)");
                 }
             }
             if(tofp && fclose(tofp)){
@@ -1909,7 +1909,7 @@ main(
 
         if(fromfp && (!ping_ctx.opt.quiet || ping_ctx.opt.raw)){
             if( do_stats(ctx,fromfp,remote,local)){
-                I2ErrLog(eh, "do_stats(\"from\" session): %M");
+                I2ErrLog(eh, "do_stats(\"from\" session)");
             }
         }
 

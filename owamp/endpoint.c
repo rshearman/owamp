@@ -715,9 +715,9 @@ success:
          * Determine data rate. i.e. size/second.
          */
         size = OWPTestPacketRate(cntrl->ctx,&ep->tsession->test_spec) *
-            _OWP_DATAREC_SIZE;
+            _OWP_MAXDATAREC_SIZE;
 
-        if(size < _OWP_DATAREC_SIZE){
+        if(size < _OWP_MAXDATAREC_SIZE){
             /* If rate is less than one packet/second then unbuffered */
             setvbuf(ep->datafile,NULL,_IONBF,0);
         }
@@ -3012,7 +3012,8 @@ run_tw_test(
     char            *reply_snd_ttl;
     char            *reply_hmac;
     ssize_t         resp_len;
-    uint8_t         ttl;
+    OWPSessionHeaderRec hdr;
+    OWPTWDataRec    twdatarec;
 
     /*
      * Get pointer to lsaddr used for listening.
@@ -3031,7 +3032,28 @@ run_tw_test(
         exit(OWP_CNTRL_FAILURE);
     }
 
-    // TODO: stats header
+    /*
+     * Prepare the file header - had to wait until now to
+     * get the real starttime.
+     */
+    memset(&hdr,0,sizeof(hdr));
+    hdr.twoway = True;
+    hdr.finished = OWP_SESSION_FINISHED_INCOMPLETE;
+    memcpy(&hdr.sid,ep->tsession->sid,sizeof(hdr.sid));
+    hdr.conf_sender = ep->tsession->conf_sender;
+    hdr.conf_receiver = ep->tsession->conf_receiver;
+    hdr.test_spec = ep->tsession->test_spec;
+    memcpy(&hdr.addr_sender,lsaddr,lsaddrlen);
+    memcpy(&hdr.addr_receiver,rsaddr,rsaddrlen);
+
+    /*
+     * Write the file header.
+     */
+    if( !OWPWriteDataHeader(ep->cntrl->ctx,ep->datafile,&hdr)){
+        OWPError(ep->cntrl->ctx,OWPErrFATAL,OWPErrUNKNOWN,
+                 "run_tw_test: Unable to write data file header");
+        exit(OWP_CNTRL_FAILURE);
+    }
 
     /*
      * Initialize pointers to various positions in the packet buffer,
@@ -3312,7 +3334,7 @@ AGAIN:
             resp_len = recvfromttl(ep->cntrl->ctx,ep->sockfd,
                                    ep->payload,resp_len_payload,lsaddr,lsaddrlen,
                                    (struct sockaddr*)&peer_addr,&peer_addr_len,
-                                   &ttl);
+                                   &twdatarec.reflected.ttl);
             if(resp_len < OWPTestTWPayloadSize(ep->cntrl->mode, 0)){
                 if(errno != EINTR){
                     OWPError(ep->cntrl->ctx,OWPErrFATAL,
@@ -3320,7 +3342,34 @@ AGAIN:
                     goto finish_sender;
                 }
 
-                // TODO: stats record for lost packet
+                /*
+                 * set fields for missing packet record
+                 */
+                twdatarec.sent.seq_no = i;
+                /* sent time */
+                twdatarec.sent.send = owptstamp;
+
+                /* special value recv time */
+                twdatarec.sent.recv = twdatarec.sent.send;
+                twdatarec.sent.recv.owptime = OWPULongToNum64(0);
+
+                twdatarec.sent.ttl = 255;
+                twdatarec.reflected.ttl = 255;
+                twdatarec.reflected.seq_no = 0;
+                twdatarec.reflected.send = twdatarec.sent.recv;
+                twdatarec.reflected.recv = twdatarec.sent.recv;
+
+                if( !OWPWriteTWDataRecord(ep->cntrl->ctx,
+                                          ep->datafile,&twdatarec)){
+                    OWPError(ep->cntrl->ctx,OWPErrFATAL,
+                             OWPErrUNKNOWN,
+                             "OWPWriteDataRecord()");
+                    goto finish_sender;
+                }
+#ifdef OWP_EXTRA_DEBUG
+                OWPError(ep->cntrl->ctx,OWPErrFATAL,
+                         OWPErrUNKNOWN,"lost packet seq %u", i);
+#endif
                 goto SKIP_SEND;
             }
 
@@ -3336,6 +3385,12 @@ AGAIN:
                          "Problem retrieving time");
                 goto finish_sender;
             }
+            /*
+             * Save that time as a timestamp
+             */
+            (void)OWPTimespecToTimestamp(&twdatarec.reflected.recv,&currtime,
+                                         &esterror,NULL);
+            twdatarec.reflected.recv.sync = sync;
 
             /*
              * Decrypt the packet if needed.
@@ -3395,7 +3450,38 @@ AGAIN:
                      ntohl(*reply_seq), resp_len);
 #endif
 
-            // TODO: stats record
+            twdatarec.sent.seq_no = i;
+            /*
+             * What time did sender send this packet?
+             */
+            _OWPDecodeTimeStamp(&twdatarec.sent.send,(uint8_t *)reply_snd_tstamp);
+            if(!_OWPDecodeTimeStampErrEstimate(&twdatarec.sent.send,(uint8_t *)reply_snd_tstamperr)){
+                OWPError(ep->cntrl->ctx,OWPErrFATAL,OWPErrUNKNOWN,
+                         "Invalid sent send timestamp!");
+                goto finish_sender;
+            }
+            _OWPDecodeTimeStamp(&twdatarec.sent.recv,(uint8_t *)reply_rcv_tstamp);
+            if(!_OWPDecodeTimeStampErrEstimate(&twdatarec.sent.recv,(uint8_t *)reply_tstamperr)){
+                OWPError(ep->cntrl->ctx,OWPErrFATAL,OWPErrUNKNOWN,
+                         "Invalid sent recv timestamp!");
+                goto finish_sender;
+            }
+            twdatarec.sent.ttl = *reply_snd_ttl;
+
+            twdatarec.reflected.seq_no = ntohl(*reply_seq);
+            _OWPDecodeTimeStamp(&twdatarec.reflected.send,(uint8_t *)reply_tstamp);
+            if(!_OWPDecodeTimeStampErrEstimate(&twdatarec.reflected.send,(uint8_t *)reply_tstamperr)){
+                OWPError(ep->cntrl->ctx,OWPErrFATAL,OWPErrUNKNOWN,
+                         "Invalid reflected send timestamp!");
+                goto finish_sender;
+            }
+
+            if( !OWPWriteTWDataRecord(ep->cntrl->ctx,ep->datafile,
+                                      &twdatarec)){
+                OWPError(ep->cntrl->ctx,OWPErrFATAL,OWPErrUNKNOWN,
+                         "OWPWriteTWDataRecord()");
+                goto finish_sender;
+            }
 
 SKIP_SEND:
             i++;
