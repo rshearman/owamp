@@ -517,7 +517,7 @@ parseassignline(
             unsigned long tlng;
 
             tlng = (int)strtoul(mask,&end,10);
-            if((*end != '\0') || (tlng < 1) ||
+            if((*end != '\0') || (tlng < 0) ||
                     (tlng > (tpid.net.addrsize*8))){
                 OWPError(policy->ctx,OWPErrFATAL,OWPErrUNKNOWN,
                         "Invalid address mask \"%s\".",mask);
